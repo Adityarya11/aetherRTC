@@ -1,0 +1,32 @@
+<!DOCTYPE html>
+<html>
+
+<head>
+    <title>AetherRTC Test</title>
+</head>
+
+<body>
+    <h2>AetherRTC Signaling Test</h2>
+    <button id="connectBtn">Send Dummy Offer</button>
+
+    <script>
+        const ws = new WebSocket('ws://localhost:8080/ws');
+
+        ws.onopen = () => {
+            console.log("Connected to AetherRTC WebSocket");
+        };
+
+        document.getElementById('connectBtn').onclick = () => {
+            // We send a JSON payload that matches your Go SignalMessage struct!
+            const dummyOffer = {
+                session_id: "test_browser_001",
+                type: "offer",
+                sdp: "v=0\r\no=dummy 12345 IN IP4 127.0.0.1\r\n"
+            };
+            ws.send(JSON.stringify(dummyOffer));
+            console.log("Dummy offer sent!");
+        };
+    </script>
+</body>
+
+</html>
