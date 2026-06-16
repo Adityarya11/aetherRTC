@@ -2,29 +2,62 @@
 <html>
 
 <head>
-    <title>AetherRTC Test</title>
+    <title>AetherRTC Client</title>
 </head>
 
 <body>
-    <h2>AetherRTC Signaling Test</h2>
-    <button id="connectBtn">Send Dummy Offer</button>
+    <h2>AetherRTC Live Microphone Test</h2>
+    <button id="startBtn">1. Connect & Speak</button>
+    <div id="status" style="margin-top: 10px; font-weight: bold; color: blue;">Status: Disconnected</div>
 
     <script>
         const ws = new WebSocket('ws://localhost:8080/ws');
+        const sessionID = "session_" + Math.floor(Math.random() * 10000);
+        let pc;
 
-        ws.onopen = () => {
-            console.log("Connected to AetherRTC WebSocket");
+        ws.onmessage = async (event) => {
+            const msg = JSON.parse(event.data);
+
+            if (msg.type === 'answer') {
+                console.log("Received Answer from Go");
+                await pc.setRemoteDescription(new RTCSessionDescription({ type: 'answer', sdp: msg.sdp }));
+            }
+            else if (msg.type === 'candidate') {
+                console.log("Received ICE Candidate from Go");
+                await pc.addIceCandidate(new RTCIceCandidate(msg.candidate));
+            }
         };
 
-        document.getElementById('connectBtn').onclick = () => {
-            // We send a JSON payload that matches your Go SignalMessage struct!
-            const dummyOffer = {
-                session_id: "test_browser_001",
-                type: "offer",
-                sdp: "v=0\r\no=dummy 12345 IN IP4 127.0.0.1\r\n"
+        document.getElementById('startBtn').onclick = async () => {
+            document.getElementById('status').innerText = "Status: Requesting Mic...";
+
+            // 1. Get Microphone
+            const stream = await navigator.mediaDevices.getUserMedia({ audio: true, video: false });
+
+            // 2. Create WebRTC Connection
+            pc = new RTCPeerConnection({
+                iceServers: [{ urls: 'stun:stun.l.google.com:19302' }]
+            });
+
+            // 3. Send our IP addresses to Go
+            pc.onicecandidate = (event) => {
+                if (event.candidate) {
+                    ws.send(JSON.stringify({ session_id: sessionID, type: 'candidate', candidate: event.candidate }));
+                }
             };
-            ws.send(JSON.stringify(dummyOffer));
-            console.log("Dummy offer sent!");
+
+            pc.oniceconnectionstatechange = () => {
+                document.getElementById('status').innerText = "Status: " + pc.iceConnectionState.toUpperCase();
+            };
+
+            // 4. Add Mic to connection
+            stream.getTracks().forEach(track => pc.addTrack(track, stream));
+
+            // 5. Create Offer and send to Go
+            const offer = await pc.createOffer();
+            await pc.setLocalDescription(offer);
+
+            ws.send(JSON.stringify({ session_id: sessionID, type: 'offer', sdp: offer.sdp }));
         };
     </script>
 </body>
