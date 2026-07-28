@@ -3,8 +3,14 @@ module atherRTC
 go 1.26.4
 
 require (
+	github.com/gorilla/websocket v1.5.3
+	github.com/pion/webrtc/v4 v4.2.15
+	google.golang.org/grpc v1.82.1
+	google.golang.org/protobuf v1.36.11
+)
+
+require (
 	github.com/google/uuid v1.6.0 // indirect
-	github.com/gorilla/websocket v1.5.3 // indirect
 	github.com/pion/datachannel v1.6.0 // indirect
 	github.com/pion/dtls/v3 v3.1.4 // indirect
 	github.com/pion/ice/v4 v4.2.7 // indirect
@@ -20,10 +26,11 @@ require (
 	github.com/pion/stun/v3 v3.1.5 // indirect
 	github.com/pion/transport/v4 v4.0.2 // indirect
 	github.com/pion/turn/v5 v5.0.9 // indirect
-	github.com/pion/webrtc/v4 v4.2.15 // indirect
 	github.com/wlynxg/anet v0.0.5 // indirect
-	golang.org/x/crypto v0.48.0 // indirect
-	golang.org/x/net v0.50.0 // indirect
-	golang.org/x/sys v0.41.0 // indirect
+	golang.org/x/crypto v0.50.0 // indirect
+	golang.org/x/net v0.53.0 // indirect
+	golang.org/x/sys v0.43.0 // indirect
+	golang.org/x/text v0.36.0 // indirect
 	golang.org/x/time v0.14.0 // indirect
+	google.golang.org/genproto/googleapis/rpc v0.0.0-20260414002931-afd174a4e478 // indirect
 )
