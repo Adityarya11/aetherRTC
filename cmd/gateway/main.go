@@ -4,6 +4,7 @@ import (
 	"log"
 	"net/http"
 
+	"atherRTC/internal/bridge"
 	"atherRTC/internal/signaling"
 	"atherRTC/internal/webrtc"
 )
@@ -11,13 +12,16 @@ import (
 func main() {
 	log.Println("[AetherRTC] Booting Edge Media Gateway...")
 
-	// 1. Initialize the Pion WebRTC Engine
 	engine := webrtc.NewEngine()
 
-	// 2. Initialize the Signaling Server with the Engine
-	sigServer := signaling.NewServer(engine)
+	bridgeClient, err := bridge.NewClient("localhost:50052")
+	if err != nil {
+		log.Fatalf("[AetherRTC] Failed to initialize bridge to orchestrator: %v", err)
+	}
+	defer bridgeClient.Close()
 
-	// 3. Mount the WebSocket route
+	sigServer := signaling.NewServer(engine, bridgeClient)
+
 	http.HandleFunc("/ws", sigServer.HandleWebSocket)
 
 	port := ":8080"

@@ -57,7 +57,7 @@ func NewPeerSession(engine *Engine, sessionID string, sendSignal func(msg interf
 		log.Printf("[WebRTC %s] INBOUND TRACK DETECTED! Codec: %s", sessionID, track.Codec().MimeType)
 
 		go func() {
-			packetCount := 0
+			droppedCount := 0
 			for {
 				rtpPacket, _, err := track.ReadRTP()
 				if err != nil {
@@ -69,15 +69,11 @@ func NewPeerSession(engine *Engine, sessionID string, sendSignal func(msg interf
 
 				select {
 				case session.PCMInboundChan <- pcmBytes:
-					// Packet successfully queued for gRPC
 				default:
-					// The channel is full! Drop the packet instead of freezing.
-					// (We will see this happen rapidly until we build the gRPC bridge)
-				}
-
-				packetCount++
-				if packetCount%100 == 0 {
-					log.Printf("[WebRTC %s] Decoded %d RTP packets -> PCMInboundChan", sessionID, packetCount)
+					droppedCount++
+					if droppedCount%50 == 0 {
+						log.Printf("[WebRTC %s] PCMInboundChan full — dropped %d packets.", sessionID, droppedCount)
+					}
 				}
 			}
 		}()

@@ -1,0 +1,82 @@
+
+diff --git a/internal/signaling/server.go b/internal/signaling/server.go
+index 760283b..2353e65 100644
+--- a/internal/signaling/server.go
++++ b/internal/signaling/server.go
+@@ -1,11 +1,13 @@
+ package signaling
+ 
+ import (
++	"context"
+ 	"encoding/json"
+ 	"log"
+ 	"net/http"
+ 	"sync"
+ 
++	"atherRTC/internal/bridge"
+ 	"atherRTC/internal/webrtc"
+ 
+ 	"github.com/gorilla/websocket"
+@@ -17,15 +19,17 @@ var upgrader = websocket.Upgrader{
+ 
+ // Server holds the active WebRTC engine and active sessions
+ type Server struct {
+-	Engine   *webrtc.Engine
+-	Sessions map[string]*webrtc.PeerSession
+-	mu       sync.Mutex
++	Engine       *webrtc.Engine
++	BridgeClient *bridge.Client
++	Sessions     map[string]*webrtc.PeerSession
++	mu           sync.Mutex
+ }
+ 
+-func NewServer(engine *webrtc.Engine) *Server {
++func NewServer(engine *webrtc.Engine, bridgeClient *bridge.Client) *Server {
+ 	return &Server{
+-		Engine:   engine,
+-		Sessions: make(map[string]*webrtc.PeerSession),
++		Engine:       engine,
++		BridgeClient: bridgeClient,
++		Sessions:     make(map[string]*webrtc.PeerSession),
+ 	}
+ }
+ 
+@@ -76,6 +80,8 @@ func (s *Server) HandleWebSocket(w http.ResponseWriter, r *http.Request) {
+ 			s.Sessions[sigMsg.SessionID] = session
+ 			s.mu.Unlock()
+ 
++			go bridge.RunSession(context.Background(), s.BridgeClient, session)
++
+ 			// Generate the Answer
+ 			if err := session.ProcessOffer(sigMsg.SDP); err != nil {
+ 				log.Printf("[Signaling] Failed to process offer: %v", err)
+diff --git a/internal/webrtc/session.go b/internal/webrtc/session.go
+index b09a9bb..b56e662 100644
+--- a/internal/webrtc/session.go
++++ b/internal/webrtc/session.go
+@@ -57,7 +57,6 @@ func NewPeerSession(engine *Engine, sessionID string, sendSignal func(msg interf
+ 		log.Printf("[WebRTC %s] INBOUND TRACK DETECTED! Codec: %s", sessionID, track.Codec().MimeType)
+ 
+ 		go func() {
+-			packetCount := 0
+ 			for {
+ 				rtpPacket, _, err := track.ReadRTP()
+ 				if err != nil {
+@@ -69,15 +68,8 @@ func NewPeerSession(engine *Engine, sessionID string, sendSignal func(msg interf
+ 
+ 				select {
+ 				case session.PCMInboundChan <- pcmBytes:
+-					// Packet successfully queued for gRPC
+-				default:
+-					// The channel is full! Drop the packet instead of freezing.
+-					// (We will see this happen rapidly until we build the gRPC bridge)
+-				}
+-
+-				packetCount++
+-				if packetCount%100 == 0 {
+-					log.Printf("[WebRTC %s] Decoded %d RTP packets -> PCMInboundChan", sessionID, packetCount)
++				case <-session.DoneChan:
++					return
+ 				}
+ 			}
+ 		}()
