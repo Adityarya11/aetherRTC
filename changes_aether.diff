@@ -1,82 +1,196 @@
+-diff --git a/internal/webrtc/session.go b/internal/webrtc/session.go
+-index 84f66e5..884b95c 100644
+---- a/internal/webrtc/session.go
+-+++ b/internal/webrtc/session.go
+-@@ -1,12 +1,15 @@
+- package webrtc
+- 
+- import (
+-+	"fmt"
+- 	"log"
+- 	"sync"
+-+	"time"
+- 
+- 	"atherRTC/pkg/codec"
+- 
+- 	pion "github.com/pion/webrtc/v4"
+-+	pionmedia "github.com/pion/webrtc/v4/pkg/media"
+- )
+- 
+- type PeerSession struct {
+-@@ -17,6 +20,8 @@ type PeerSession struct {
+- 	PCMInboundChan  chan []byte
+- 	PCMOutboundChan chan []byte
+- 
+-+	OutboundTrack *pion.TrackLocalStaticSample
+-+
+- 	DoneChan chan struct{}
+- 	mu       sync.Mutex
+- }
+-@@ -27,12 +32,31 @@ func NewPeerSession(engine *Engine, sessionID string, sendSignal func(msg interf
+- 		return nil, err
+- 	}
+- 
+-+	outboundTrack, err := pion.NewTrackLocalStaticSample(
+-+		pion.RTPCodecCapability{
+-+			MimeType:  pion.MimeTypePCMU,
+-+			ClockRate: 8000,
+-+			Channels:  1,
+-+		},
+-+		"audio",
+-+		"aetherrtc-"+sessionID,
+-+	)
+-+
+-+	if err != nil {
+-+		return nil, fmt.Errorf("failed to create outbound track: %v", err)
+-+	}
+-+
+-+	if _, err := pc.AddTrack(outboundTrack); err != nil {
+-+		return nil, fmt.Errorf("failed to add outbound track: %v", err)
+-+	}
+-+
+- 	session := &PeerSession{
+- 		SessionID:       sessionID,
+- 		PeerConnection:  pc,
+- 		SendSignal:      sendSignal,
+- 		PCMInboundChan:  make(chan []byte, 100),
+- 		PCMOutboundChan: make(chan []byte, 100),
+-+		OutboundTrack:   outboundTrack,
+- 		DoneChan:        make(chan struct{}),
+- 	}
+- 
+-@@ -79,6 +103,24 @@ func NewPeerSession(engine *Engine, sessionID string, sendSignal func(msg interf
+- 		}()
+- 	})
+- 
+-+	go func() {
+-+		for {
+-+			select {
+-+			case pcm := <-session.PCMOutboundChan:
+-+				ulawData := codec.EncodeUlaw(pcm)
+-+				err := outboundTrack.WriteSample(pionmedia.Sample{
+-+					Data:     ulawData,
+-+					Duration: 20 * time.Millisecond,
+-+				})
+-+				if err != nil {
+-+					log.Printf("[WebRTC %s] Failed to write outbound sample: %v", sessionID, err)
+-+				}
+-+			case <-session.DoneChan:
+-+				return
+-+			}
+-+		}
+-+	}()
+-+
+- 	return session, nil
+- }
+- 
+-diff --git a/pkg/codec/g117.go b/pkg/codec/g117.go
+-index 6b0c206..7899c78 100644
+---- a/pkg/codec/g117.go
+-+++ b/pkg/codec/g117.go
+-@@ -48,3 +48,45 @@ func DecodeUlaw(ulaw []byte) []byte {
+- 	}
+- 	return pcmBytes
+- }
+-+
+-+const (
+-+	ulawBias = 0x84
+-+	ulawClip = 32635
+-+)
+-+
+-+func EncodeUlaw(pcm []byte) []byte {
+-+	sampleCount := len(pcm) / 2
+-+	ulawBytes := make([]byte, sampleCount)
+-+
+-+	for i := 0; i < sampleCount; i++ {
+-+		sample := int16(pcm[i*2]) | int16(pcm[i*2+1])<<8
+-+		ulawBytes[i] = encodeUlawSample(sample)
+-+	}
+-+
+-+	return ulawBytes
+-+}
+-+
+-+func encodeUlawSample(sample int16) byte {
+-+	var sign byte
+-+	s := int32(sample)
+-+
+-+	if s < 0 {
+-+		sign = 0x80
+-+		s = -s
+-+	}
+-+
+-+	if s > ulawClip {
+-+		s = ulawClip
+-+	}
+-+	s += ulawBias
+-+
+-+	exponent := byte(7)
+-+	for expMask := int32(0x4000); s&expMask == 0 && exponent > 0; expMask >>= 1 {
+-+		exponent--
+-+	}
+-+
+-+	mantissa := byte((s >> (uint(exponent) + 3)) & 0x0F)
+-+	ulawByte := ^(sign | (exponent << 4) | mantissa)
+-+
+-+	return ulawByte
+-+}
 
-diff --git a/internal/signaling/server.go b/internal/signaling/server.go
-index 760283b..2353e65 100644
---- a/internal/signaling/server.go
-+++ b/internal/signaling/server.go
-@@ -1,11 +1,13 @@
- package signaling
- 
- import (
-+	"context"
- 	"encoding/json"
- 	"log"
- 	"net/http"
- 	"sync"
- 
-+	"atherRTC/internal/bridge"
- 	"atherRTC/internal/webrtc"
- 
- 	"github.com/gorilla/websocket"
-@@ -17,15 +19,17 @@ var upgrader = websocket.Upgrader{
- 
- // Server holds the active WebRTC engine and active sessions
- type Server struct {
--	Engine   *webrtc.Engine
--	Sessions map[string]*webrtc.PeerSession
--	mu       sync.Mutex
-+	Engine       *webrtc.Engine
-+	BridgeClient *bridge.Client
-+	Sessions     map[string]*webrtc.PeerSession
-+	mu           sync.Mutex
- }
- 
--func NewServer(engine *webrtc.Engine) *Server {
-+func NewServer(engine *webrtc.Engine, bridgeClient *bridge.Client) *Server {
- 	return &Server{
--		Engine:   engine,
--		Sessions: make(map[string]*webrtc.PeerSession),
-+		Engine:       engine,
-+		BridgeClient: bridgeClient,
-+		Sessions:     make(map[string]*webrtc.PeerSession),
- 	}
- }
- 
-@@ -76,6 +80,8 @@ func (s *Server) HandleWebSocket(w http.ResponseWriter, r *http.Request) {
- 			s.Sessions[sigMsg.SessionID] = session
- 			s.mu.Unlock()
- 
-+			go bridge.RunSession(context.Background(), s.BridgeClient, session)
-+
- 			// Generate the Answer
- 			if err := session.ProcessOffer(sigMsg.SDP); err != nil {
- 				log.Printf("[Signaling] Failed to process offer: %v", err)
 diff --git a/internal/webrtc/session.go b/internal/webrtc/session.go
-index b09a9bb..b56e662 100644
+index 884b95c..8460e07 100644
 --- a/internal/webrtc/session.go
 +++ b/internal/webrtc/session.go
-@@ -57,7 +57,6 @@ func NewPeerSession(engine *Engine, sessionID string, sendSignal func(msg interf
+@@ -81,7 +81,6 @@ func NewPeerSession(engine *Engine, sessionID string, sendSignal func(msg interf
  		log.Printf("[WebRTC %s] INBOUND TRACK DETECTED! Codec: %s", sessionID, track.Codec().MimeType)
  
  		go func() {
--			packetCount := 0
+-			droppedCount := 0
  			for {
  				rtpPacket, _, err := track.ReadRTP()
  				if err != nil {
-@@ -69,15 +68,8 @@ func NewPeerSession(engine *Engine, sessionID string, sendSignal func(msg interf
+@@ -93,11 +92,8 @@ func NewPeerSession(engine *Engine, sessionID string, sendSignal func(msg interf
  
  				select {
  				case session.PCMInboundChan <- pcmBytes:
--					// Packet successfully queued for gRPC
 -				default:
--					// The channel is full! Drop the packet instead of freezing.
--					// (We will see this happen rapidly until we build the gRPC bridge)
--				}
--
--				packetCount++
--				if packetCount%100 == 0 {
--					log.Printf("[WebRTC %s] Decoded %d RTP packets -> PCMInboundChan", sessionID, packetCount)
+-					droppedCount++
+-					if droppedCount%50 == 0 {
+-						log.Printf("[WebRTC %s] PCMInboundChan full — dropped %d packets.", sessionID, droppedCount)
+-					}
 +				case <-session.DoneChan:
 +					return
  				}
  			}
  		}()
+@@ -108,9 +104,10 @@ func NewPeerSession(engine *Engine, sessionID string, sendSignal func(msg interf
+ 			select {
+ 			case pcm := <-session.PCMOutboundChan:
+ 				ulawData := codec.EncodeUlaw(pcm)
++				duration := time.Duration(len(ulawData)) * time.Second / 8000
+ 				err := outboundTrack.WriteSample(pionmedia.Sample{
+ 					Data:     ulawData,
+-					Duration: 20 * time.Millisecond,
++					Duration: duration,
+ 				})
+ 				if err != nil {
+ 					log.Printf("[WebRTC %s] Failed to write outbound sample: %v", sessionID, err)
+diff --git a/pkg/codec/g117.go b/pkg/codec/g117.go
+index 7899c78..344a5d0 100644
+--- a/pkg/codec/g117.go
++++ b/pkg/codec/g117.go
+@@ -1,5 +1,7 @@
+ package codec
+ 
++import "encoding/binary"
++
+ // UlawToPcm16Table maps 8-bit mu-law to 16-bit linear PCM.
+ // This is the standard, zero-dependency telephony decoding matrix.
+ var UlawToPcm16Table = [256]int16{
+@@ -59,7 +61,7 @@ func EncodeUlaw(pcm []byte) []byte {
+ 	ulawBytes := make([]byte, sampleCount)
+ 
+ 	for i := 0; i < sampleCount; i++ {
+-		sample := int16(pcm[i*2]) | int16(pcm[i*2+1])<<8
++		sample := int16(binary.LittleEndian.Uint16(pcm[i*2 : i*2+2]))
+ 		ulawBytes[i] = encodeUlawSample(sample)
+ 	}
+ 
