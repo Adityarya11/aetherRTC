@@ -1,63 +1,371 @@
-<!DOCTYPE html>
-<html>
+<!doctype html>
+<html lang="en">
 
 <head>
-    <title>AetherRTC Client</title>
+    <meta charset="UTF-8" />
+    <title>AetherRTC — Live Microphone Test</title>
+    <style>
+        * {
+            box-sizing: border-box;
+        }
+
+        body {
+            font-family:
+                -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+            background: #111214;
+            color: #e4e4e6;
+            max-width: 640px;
+            margin: 48px auto;
+            padding: 0 24px;
+        }
+
+        h2 {
+            font-weight: 600;
+            margin-bottom: 4px;
+        }
+
+        .subtitle {
+            color: #8a8a90;
+            font-size: 14px;
+            margin-bottom: 32px;
+        }
+
+        .controls {
+            display: flex;
+            gap: 12px;
+            margin-bottom: 20px;
+        }
+
+        button {
+            flex: 1;
+            padding: 12px 16px;
+            border: none;
+            border-radius: 6px;
+            font-size: 14px;
+            font-weight: 600;
+            cursor: pointer;
+        }
+
+        #startBtn {
+            background: #4caf50;
+            color: #fff;
+        }
+
+        #startBtn:disabled {
+            background: #2a3a2b;
+            color: #6a6a6a;
+            cursor: not-allowed;
+        }
+
+        #stopBtn {
+            background: #b23b3b;
+            color: #fff;
+        }
+
+        #stopBtn:disabled {
+            background: #3a2a2a;
+            color: #6a6a6a;
+            cursor: not-allowed;
+        }
+
+        .status-row {
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+            background: #1a1b1e;
+            border: 1px solid #2a2b2e;
+            border-radius: 6px;
+            padding: 12px 16px;
+            margin-bottom: 16px;
+            font-size: 14px;
+        }
+
+        #statusText {
+            font-weight: 600;
+        }
+
+        #timer {
+            color: #8a8a90;
+            font-variant-numeric: tabular-nums;
+        }
+
+        .meter-label {
+            font-size: 12px;
+            color: #8a8a90;
+            margin-bottom: 6px;
+        }
+
+        .meter-bar {
+            width: 100%;
+            height: 10px;
+            background: #1a1b1e;
+            border: 1px solid #2a2b2e;
+            border-radius: 5px;
+            overflow: hidden;
+            margin-bottom: 24px;
+        }
+
+        #meterFill {
+            height: 100%;
+            width: 0%;
+            background: #4caf50;
+            transition: width 60ms linear;
+        }
+
+        .log-label {
+            font-size: 12px;
+            color: #8a8a90;
+            margin-bottom: 6px;
+        }
+
+        #log {
+            background: #0c0d0e;
+            border: 1px solid #2a2b2e;
+            border-radius: 6px;
+            padding: 12px;
+            height: 220px;
+            overflow-y: auto;
+            font-family: "SF Mono", Consolas, monospace;
+            font-size: 12px;
+            line-height: 1.6;
+        }
+
+        .log-line {
+            color: #8a8a90;
+        }
+
+        .log-line .ts {
+            color: #4a4a4e;
+        }
+    </style>
 </head>
 
 <body>
-    <h2>AetherRTC Live Microphone Test</h2>
-    <button id="startBtn">1. Connect & Speak</button>
-    <div id="status" style="margin-top: 10px; font-weight: bold; color: blue;">Status: Disconnected</div>
+    <h2>AetherRTC — Live Microphone Test</h2>
+    <div class="subtitle">
+        Milestone 4 verification harness: browser → AetherRTC →
+        Orchestrator-Go → Inference-Python
+    </div>
+
+    <div class="controls">
+        <button id="startBtn">Start Call</button>
+        <button id="stopBtn" disabled>End Call</button>
+    </div>
+
+    <div class="status-row">
+        <span id="statusText">Status: Idle</span>
+        <span id="timer"></span>
+    </div>
+
+    <div class="meter-label">
+        Microphone level (confirms audio capture, independent of backend)
+    </div>
+    <div class="meter-bar">
+        <div id="meterFill"></div>
+    </div>
+
+    <audio id="remoteAudio" autoplay playsinline></audio>
+
+    <div class="log-label">Event log</div>
+    <div id="log"></div>
 
     <script>
-        const ws = new WebSocket('ws://localhost:8080/ws');
-        const sessionID = "session_" + Math.floor(Math.random() * 10000);
-        let pc;
+        const sessionID = "session_" + Math.floor(Math.random() * 100000);
+        let ws,
+            pc,
+            localStream,
+            audioCtx,
+            analyser,
+            meterRAF,
+            timerInterval,
+            startTime;
 
-        ws.onmessage = async (event) => {
-            const msg = JSON.parse(event.data);
+        const logEl = document.getElementById("log");
+        const statusEl = document.getElementById("statusText");
+        const timerEl = document.getElementById("timer");
+        const startBtn = document.getElementById("startBtn");
+        const stopBtn = document.getElementById("stopBtn");
+        const meterFill = document.getElementById("meterFill");
+        const remoteAudio = document.getElementById("remoteAudio");
 
-            if (msg.type === 'answer') {
-                console.log("Received Answer from Go");
-                await pc.setRemoteDescription(new RTCSessionDescription({ type: 'answer', sdp: msg.sdp }));
+        function logEvent(message) {
+            const ts = new Date().toLocaleTimeString();
+            const line = document.createElement("div");
+            line.className = "log-line";
+            line.innerHTML = `<span class="ts">[${ts}]</span> ${message}`;
+            logEl.appendChild(line);
+            logEl.scrollTop = logEl.scrollHeight;
+        }
+
+        function setStatus(text) {
+            statusEl.textContent = "Status: " + text;
+        }
+
+        function startTimer() {
+            startTime = Date.now();
+            timerInterval = setInterval(() => {
+                const elapsed = Math.floor((Date.now() - startTime) / 1000);
+                const mm = String(Math.floor(elapsed / 60)).padStart(
+                    2,
+                    "0",
+                );
+                const ss = String(elapsed % 60).padStart(2, "0");
+                timerEl.textContent = `${mm}:${ss}`;
+            }, 500);
+        }
+
+        function stopTimer() {
+            clearInterval(timerInterval);
+            timerEl.textContent = "";
+        }
+
+        function startMeter(stream) {
+            audioCtx = new AudioContext();
+            const source = audioCtx.createMediaStreamSource(stream);
+            analyser = audioCtx.createAnalyser();
+            analyser.fftSize = 256;
+            source.connect(analyser);
+
+            const data = new Uint8Array(analyser.frequencyBinCount);
+
+            function tick() {
+                analyser.getByteFrequencyData(data);
+                const avg = data.reduce((a, b) => a + b, 0) / data.length;
+                meterFill.style.width =
+                    Math.min(100, (avg / 128) * 100) + "%";
+                meterRAF = requestAnimationFrame(tick);
             }
-            else if (msg.type === 'candidate') {
-                console.log("Received ICE Candidate from Go");
-                await pc.addIceCandidate(new RTCIceCandidate(msg.candidate));
+            tick();
+        }
+
+        function stopMeter() {
+            if (meterRAF) cancelAnimationFrame(meterRAF);
+            if (audioCtx) audioCtx.close();
+            meterFill.style.width = "0%";
+        }
+
+        function connectWebSocket() {
+            ws = new WebSocket("ws://localhost:8080/ws");
+
+            ws.onopen = () =>
+                logEvent("WebSocket connected to signaling server.");
+
+            ws.onmessage = async (event) => {
+                const msg = JSON.parse(event.data);
+
+                if (msg.type === "answer") {
+                    logEvent("Received SDP answer from AetherRTC.");
+                    await pc.setRemoteDescription(
+                        new RTCSessionDescription({
+                            type: "answer",
+                            sdp: msg.sdp,
+                        }),
+                    );
+                } else if (msg.type === "candidate") {
+                    logEvent("Received ICE candidate from AetherRTC.");
+                    await pc.addIceCandidate(
+                        new RTCIceCandidate(msg.candidate),
+                    );
+                }
+            };
+
+            ws.onclose = () => logEvent("WebSocket closed.");
+        }
+
+        startBtn.onclick = async () => {
+            startBtn.disabled = true;
+            setStatus("Requesting microphone...");
+            logEvent("Requesting microphone access.");
+
+            try {
+                localStream = await navigator.mediaDevices.getUserMedia({
+                    audio: {
+                        echoCancellation: true,
+                        noiseSuppression: true,
+                        autoGainControl: true,
+                    },
+                    video: false,
+                });
+            } catch (err) {
+                logEvent("Microphone access denied: " + err.message);
+                setStatus("Microphone access denied");
+                startBtn.disabled = false;
+                return;
             }
-        };
 
-        document.getElementById('startBtn').onclick = async () => {
-            document.getElementById('status').innerText = "Status: Requesting Mic...";
+            startMeter(localStream);
+            connectWebSocket();
 
-            // 1. Get Microphone
-            const stream = await navigator.mediaDevices.getUserMedia({ audio: true, video: false });
-
-            // 2. Create WebRTC Connection
             pc = new RTCPeerConnection({
-                iceServers: [{ urls: 'stun:stun.l.google.com:19302' }]
+                iceServers: [{ urls: "stun:stun.l.google.com:19302" }],
             });
 
-            // 3. Send our IP addresses to Go
+            pc.ontrack = (event) => {
+                logEvent("Received remote audio track from AetherRTC.");
+                remoteAudio.srcObject = event.streams[0] || new MediaStream([event.track]);
+                remoteAudio.play().catch((err) =>
+                    logEvent("Remote audio playback blocked: " + err.message),
+                );
+            };
+
             pc.onicecandidate = (event) => {
                 if (event.candidate) {
-                    ws.send(JSON.stringify({ session_id: sessionID, type: 'candidate', candidate: event.candidate }));
+                    ws.send(
+                        JSON.stringify({
+                            session_id: sessionID,
+                            type: "candidate",
+                            candidate: event.candidate,
+                        }),
+                    );
                 }
             };
 
             pc.oniceconnectionstatechange = () => {
-                document.getElementById('status').innerText = "Status: " + pc.iceConnectionState.toUpperCase();
+                logEvent("ICE connection state: " + pc.iceConnectionState);
+                setStatus(pc.iceConnectionState.toUpperCase());
+
+                if (pc.iceConnectionState === "connected") {
+                    startTimer();
+                    stopBtn.disabled = false;
+                }
+                if (
+                    pc.iceConnectionState === "disconnected" ||
+                    pc.iceConnectionState === "failed" ||
+                    pc.iceConnectionState === "closed"
+                ) {
+                    stopTimer();
+                }
             };
 
-            // 4. Add Mic to connection
-            stream.getTracks().forEach(track => pc.addTrack(track, stream));
+            localStream
+                .getTracks()
+                .forEach((track) => pc.addTrack(track, localStream));
 
-            // 5. Create Offer and send to Go
             const offer = await pc.createOffer();
             await pc.setLocalDescription(offer);
+            ws.send(
+                JSON.stringify({
+                    session_id: sessionID,
+                    type: "offer",
+                    sdp: offer.sdp,
+                }),
+            );
+            logEvent("Sent SDP offer (session_id=" + sessionID + ").");
+        };
 
-            ws.send(JSON.stringify({ session_id: sessionID, type: 'offer', sdp: offer.sdp }));
+        stopBtn.onclick = () => {
+            logEvent("Ending call.");
+
+            if (pc) pc.close();
+            if (ws) ws.close();
+            if (localStream)
+                localStream.getTracks().forEach((t) => t.stop());
+            stopMeter();
+            stopTimer();
+
+            setStatus("Idle");
+            startBtn.disabled = false;
+            stopBtn.disabled = true;
         };
     </script>
 </body>

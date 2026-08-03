@@ -1,5 +1,7 @@
 package codec
 
+import "encoding/binary"
+
 // UlawToPcm16Table maps 8-bit mu-law to 16-bit linear PCM.
 // This is the standard, zero-dependency telephony decoding matrix.
 var UlawToPcm16Table = [256]int16{
@@ -47,4 +49,46 @@ func DecodeUlaw(ulaw []byte) []byte {
 		pcmBytes[i*2+1] = byte(sample >> 8)
 	}
 	return pcmBytes
+}
+
+const (
+	ulawBias = 0x84
+	ulawClip = 32635
+)
+
+func EncodeUlaw(pcm []byte) []byte {
+	sampleCount := len(pcm) / 2
+	ulawBytes := make([]byte, sampleCount)
+
+	for i := 0; i < sampleCount; i++ {
+		sample := int16(binary.LittleEndian.Uint16(pcm[i*2 : i*2+2]))
+		ulawBytes[i] = encodeUlawSample(sample)
+	}
+
+	return ulawBytes
+}
+
+func encodeUlawSample(sample int16) byte {
+	var sign byte
+	s := int32(sample)
+
+	if s < 0 {
+		sign = 0x80
+		s = -s
+	}
+
+	if s > ulawClip {
+		s = ulawClip
+	}
+	s += ulawBias
+
+	exponent := byte(7)
+	for expMask := int32(0x4000); s&expMask == 0 && exponent > 0; expMask >>= 1 {
+		exponent--
+	}
+
+	mantissa := byte((s >> (uint(exponent) + 3)) & 0x0F)
+	ulawByte := ^(sign | (exponent << 4) | mantissa)
+
+	return ulawByte
 }
