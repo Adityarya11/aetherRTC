@@ -118,34 +118,66 @@ func NewPeerSession(engine *Engine, sessionID string, sendSignal func(msg interf
 	})
 
 	go func() {
-		const pcmFrameBytes = 320 // 20ms of 8kHz, 16-bit mono PCM
-		pcmBuffer := make([]byte, 0, pcmFrameBytes*4)
-		ticker := time.NewTicker(20 * time.Millisecond)
+		const (
+			pcmFrameBytes = 320 // 20ms of 8kHz, 16-bit mono PCM
+			frameDuration = 20 * time.Millisecond
+			// Held past the last emitted frame so gaps in TTS delivery between
+			// sentences do not read as the agent having stopped speaking.
+			speakingHangover = 400 * time.Millisecond
+			maxCatchUpFrames = 5
+		)
+
+		ticker := time.NewTicker(frameDuration)
 		defer ticker.Stop()
+
+		pcmBuffer := make([]byte, 0, pcmFrameBytes*64)
+		var nextFrameAt time.Time
+		speaking := false
 
 		for {
 			select {
-			case pcm := <-session.PCMOutboundChan:
-				session.AgentSpeaking.Store(true)
-				pcmBuffer = append(pcmBuffer, pcm...)
-				for len(pcmBuffer) >= pcmFrameBytes {
-					<-ticker.C
-					frame := pcmBuffer[:pcmFrameBytes]
-					pcmBuffer = pcmBuffer[pcmFrameBytes:]
-
-					ulawData := codec.EncodeUlaw(frame)
-					if err := outboundTrack.WriteSample(pionmedia.Sample{
-						Data:     ulawData,
-						Duration: 20 * time.Millisecond,
-					}); err != nil {
-						log.Printf("[WebRTC %s] Failed to write outbound sample: %v", sessionID, err)
-					}
-				}
-			case <-time.After(300 * time.Millisecond):
-				session.AgentSpeaking.Store(false)
-				pcmBuffer = pcmBuffer[:0]
 			case <-session.DoneChan:
 				return
+			case <-ticker.C:
+			}
+
+			for draining := true; draining; {
+				select {
+				case pcm := <-session.PCMOutboundChan:
+					pcmBuffer = append(pcmBuffer, pcm...)
+				default:
+					draining = false
+				}
+			}
+
+			now := time.Now()
+
+			if !speaking && len(pcmBuffer) >= pcmFrameBytes {
+				speaking = true
+				nextFrameAt = now
+				session.AgentSpeaking.Store(true)
+			}
+
+			for emitted := 0; speaking &&
+				len(pcmBuffer) >= pcmFrameBytes &&
+				!now.Before(nextFrameAt) &&
+				emitted < maxCatchUpFrames; emitted++ {
+
+				ulawData := codec.EncodeUlaw(pcmBuffer[:pcmFrameBytes])
+				if err := outboundTrack.WriteSample(pionmedia.Sample{
+					Data:     ulawData,
+					Duration: frameDuration,
+				}); err != nil {
+					log.Printf("[WebRTC %s] Failed to write outbound sample: %v", sessionID, err)
+				}
+
+				pcmBuffer = append(pcmBuffer[:0], pcmBuffer[pcmFrameBytes:]...)
+				nextFrameAt = nextFrameAt.Add(frameDuration)
+			}
+
+			if speaking && len(pcmBuffer) < pcmFrameBytes && now.Sub(nextFrameAt) >= speakingHangover {
+				speaking = false
+				session.AgentSpeaking.Store(false)
 			}
 		}
 	}()
