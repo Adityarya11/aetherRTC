@@ -3,6 +3,7 @@ package bridge
 import (
 	"context"
 	"fmt"
+	"strings"
 
 	gatewaypb "atherRTC/generated/gateway"
 
@@ -18,14 +19,26 @@ type Client struct {
 
 func NewClient(orchestratorAddr string) (*Client, error) {
 	conn, err := grpc.NewClient(
-		orchestratorAddr,
+		dialTarget(orchestratorAddr),
 		grpc.WithTransportCredentials(insecure.NewCredentials()),
 	)
 	if err != nil {
 		return nil, fmt.Errorf("bridge: failed to connect to orchestrator: %v", err)
 	}
 
+	conn.Connect()
+
 	return &Client{conn: conn}, nil
+}
+
+// grpc.NewClient defaults to the dns resolver, which blocks the first RPC on a
+// TXT lookup for service config that can take over ten seconds to fail. These
+// targets are always a literal host:port, so dial them directly.
+func dialTarget(addr string) string {
+	if strings.Contains(addr, "://") {
+		return addr
+	}
+	return "passthrough:///" + addr
 }
 
 func (c *Client) OpenSession(ctx context.Context, sessionID string) (gatewaypb.Gateway_StreamAudioClient, error) {

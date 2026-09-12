@@ -54,8 +54,13 @@ func (s *Server) HandleWebSocket(w http.ResponseWriter, r *http.Request) {
 
 	log.Printf("[Signaling] Connected: %s", r.RemoteAddr)
 
-	// Helper to send JSON back down this specific WebSocket
+	// Helper to send JSON back down this specific WebSocket.
+	// Pion fires OnICECandidate from its own goroutines, so writes must be
+	// serialised -- gorilla/websocket permits only one concurrent writer.
+	var writeMu sync.Mutex
 	sendSignal := func(msg interface{}) error {
+		writeMu.Lock()
+		defer writeMu.Unlock()
 		return conn.WriteJSON(msg)
 	}
 
@@ -79,6 +84,17 @@ func (s *Server) HandleWebSocket(w http.ResponseWriter, r *http.Request) {
 		switch sigMsg.Type {
 		case "offer":
 			log.Printf("[Signaling] Processing OFFER for %s", sigMsg.SessionID)
+
+			// A repeat offer on the same ID would otherwise orphan the previous
+			// session's goroutines and its open bridge stream.
+			if exists {
+				log.Printf("[Signaling] Replacing existing session %s", sigMsg.SessionID)
+				session.Close()
+				s.mu.Lock()
+				delete(s.Sessions, sigMsg.SessionID)
+				s.mu.Unlock()
+				delete(connectionSessions, sigMsg.SessionID)
+			}
 
 			// Create a new WebRTC session
 			session, err = webrtc.NewPeerSession(s.Engine, sigMsg.SessionID, sendSignal)

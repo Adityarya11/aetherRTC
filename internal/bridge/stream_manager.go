@@ -44,7 +44,6 @@ func RunSession(ctx context.Context, client *Client, session *webrtc.PeerSession
 
 	outboundDone := make(chan struct{})
 	go func() {
-		droppedOutbound := 0
 		defer close(outboundDone)
 		for {
 			event, err := stream.Recv()
@@ -62,11 +61,6 @@ func RunSession(ctx context.Context, client *Client, session *webrtc.PeerSession
 				case session.PCMOutboundChan <- audio.Data:
 				case <-session.DoneChan:
 					return
-				default:
-					droppedOutbound++
-					if droppedOutbound%50 == 0 {
-						log.Printf("[Bridge %s] PCMOutboundChan full or unwired - dropped %d outbound chunks.", session.SessionID, droppedOutbound)
-					}
 				}
 			}
 		}
